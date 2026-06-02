@@ -861,6 +861,11 @@ void ONNXImporter::populateNet()
         {
             inpShape[0] = std::max(inpShape[0], 1); // It's OK to have undetermined batch size
         }
+        // cv::Mat::create() promotes 1D arrays to 2D column vectors (dims=2, cols=1).
+        // Expand 1D ONNX shapes to {N, 1} here so that import-time shape inference
+        // stays consistent with what the runtime blobs actually look like.
+        if (dim_size == 1)
+            inpShape.push_back(1);
         outShapes[valueInfoProto.name()] = inpShape;
         // fill map: push layer name, layer id and output id
         if (!isInitialized)

@@ -10,6 +10,9 @@
 #include "npy_blob.hpp"
 #include <opencv2/dnn/shape_utils.hpp>
 #include <numeric>
+#ifdef HAVE_PROTOBUF
+#include "opencv-onnx.pb.h"
+#endif
 namespace opencv_test { namespace {
 
 void yoloPostProcessing(
@@ -1030,6 +1033,66 @@ TEST_P(Test_ONNX_layers, Expand)
 
 TEST_P(Test_ONNX_layers, ExpandIdentity) {
     testONNXModels("expand_identity");
+}
+
+// Regression test for https://github.com/opencv/opencv/issues/28339
+// Identity op with a 1D ONNX input must pass values through without corruption.
+// OpenCV represents 1D ONNX tensors as 2D {N,1} cv::Mat objects internally.
+TEST_P(Test_ONNX_layers, Identity_1D)
+{
+#ifdef HAVE_PROTOBUF
+    // Build a minimal in-memory ONNX model: inp[5] -> Identity -> out[5]
+    opencv_onnx::ModelProto model;
+    model.set_ir_version(7);
+    model.add_opset_import()->set_version(13);
+
+    opencv_onnx::GraphProto* graph = model.mutable_graph();
+    graph->set_name("identity_1d");
+
+    opencv_onnx::NodeProto* node = graph->add_node();
+    node->add_input("inp");
+    node->add_output("out");
+    node->set_op_type("Identity");
+
+    // Helper: register a 1D float tensor with the given name and size.
+    auto addValueInfo = [](opencv_onnx::GraphProto* g, const std::string& name,
+                           int64_t size, bool is_input)
+    {
+        opencv_onnx::ValueInfoProto* vi = is_input ? g->add_input() : g->add_output();
+        vi->set_name(name);
+        auto* tt = vi->mutable_type()->mutable_tensor_type();
+        tt->set_elem_type(1);  // FLOAT
+        tt->mutable_shape()->add_dim()->set_dim_value(size);
+    };
+    addValueInfo(graph, "inp", 5, /*is_input=*/true);
+    addValueInfo(graph, "out", 5, /*is_input=*/false);
+
+    std::string buf;
+    ASSERT_TRUE(model.SerializeToString(&buf));
+
+    Net net = readNetFromONNX(buf.data(), buf.size());
+    ASSERT_FALSE(net.empty());
+    net.setPreferableBackend(backend);
+    net.setPreferableTarget(target);
+
+    // OpenCV stores 1D ONNX tensors as 2D {N,1} column vectors.
+    float data[5] = {1.f, 2.f, 3.f, 4.f, 5.f};
+    Mat inp(5, 1, CV_32F, data);
+
+    net.setInput(inp, "inp");
+    Mat out = net.forward();
+
+    // Shape must be {5, 1} — OpenCV's canonical form for a 1D ONNX tensor.
+    ASSERT_EQ(out.dims, 2);
+    ASSERT_EQ(out.size[0], 5);
+    ASSERT_EQ(out.size[1], 1);
+
+    // Values must be passed through without modification.
+    for (int i = 0; i < 5; ++i)
+        EXPECT_NEAR(out.at<float>(i, 0), data[i], 1e-5f);
+#else
+    throw SkipTestException("Test requires protobuf");
+#endif
 }
 
 TEST_P(Test_ONNX_layers, ExpandBatch) {
